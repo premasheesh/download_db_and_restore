@@ -1,0 +1,216 @@
+# download_latest_from_latest_folder.ps1
+# Downloads the newest .bak file from the most recent YYYYMMDD folder in S3
+# Then restores it to SQL Server using sqlcmd. PowerShell 5-safe.
+
+# ==== CONFIG ====
+param(
+    [switch]$DryRun
+)
+
+$Bucket       = "ass-rds-backup-shared"
+$BasePrefix   = "residential_mtl"     # top-level prefix under the bucket
+$InnerSuffix  = "residential_mtl"     # optional inner folder under YYYYMMDD
+$OutRoot      = "C:\db_latest_backup" #"$HOME\db_latest_backup"
+$Profile      = "default"
+$Region       = ""
+$NoVerify     = $false
+$MaxRetries   = 3
+$SleepBase    = 5
+$RequireFull  = $true                  # true = only match _FULL_ files
+
+# SQL restore config
+$SqlInstance  = "localhost"            
+$DefaultDbFallback = "residential_mtl"   # used if DB name can't be parsed from filename
+
+# ==== SETUP ====
+$ErrorActionPreference = "Stop"
+$env:PYTHONWARNINGS = "ignore:Unverified HTTPS request"
+
+function Log($msg) { Write-Host ("[{0:yyyy-MM-dd HH:mm:ss}] {1}" -f (Get-Date), $msg) }
+
+# AWS CLI detection
+$awsCmdObj = Get-Command aws.exe -ErrorAction SilentlyContinue
+if (-not $awsCmdObj) { Log "AWS CLI not found. Install AWS CLI v2 and ensure it is in PATH."; exit 1 }
+$AwsCmd = $awsCmdObj.Source
+
+# sqlcmd detection
+$sqlcmdObj = Get-Command sqlcmd.exe -ErrorAction SilentlyContinue
+if (-not $sqlcmdObj) { Log "sqlcmd.exe not found. Install SQL Server Command Line Utilities or ensure it's in PATH."; exit 1 }
+$SqlCmd = $sqlcmdObj.Source
+
+# Build common AWS args
+$Common = @()
+if ($Profile) { $Common += @("--profile", $Profile) }
+if ($Region)  { $Common += @("--region", $Region) }
+if ($NoVerify){ $Common += "--no-verify-ssl" }
+
+# Validate AWS credentials
+try {
+    & "$AwsCmd" sts get-caller-identity @Common | Out-Null
+} catch {
+    Log "AWS credentials invalid or expired."; exit 1
+}
+
+# ==== FIND LATEST FOLDER ====
+Log "Listing folders under s3://$Bucket/$BasePrefix/"
+$rootArgs = @("s3api", "list-objects-v2", "--bucket", $Bucket, "--prefix", "$BasePrefix/", "--delimiter", "/", "--output", "json") + $Common
+$rootOut = & "$AwsCmd" @rootArgs 2>$null
+if (-not $rootOut) { Log "No output from AWS CLI."; exit 1 }
+if ($rootOut -match '"AccessDenied"') { Log "Access denied to bucket $Bucket."; exit 1 }
+
+try { $rootObj = $rootOut | ConvertFrom-Json } catch { Log "Invalid JSON from AWS CLI."; exit 1 }
+
+$AllFolders = @()
+foreach ($cp in $rootObj.CommonPrefixes) {
+    if ($cp.Prefix -match "$BasePrefix/(\d{8})/") { $AllFolders += $Matches[1] }
+}
+if (-not $AllFolders) { Log "No folders found under $BasePrefix/"; exit 0 }
+
+[int]$Latest = ($AllFolders | ForEach-Object { [int]$_ } | Measure-Object -Maximum).Maximum
+$LatestFolder = ("{0:D8}" -f $Latest)
+Log "Latest folder: $LatestFolder"
+
+# ==== FIND LATEST .BAK IN THAT FOLDER ====
+$Prefix = if ($InnerSuffix) { "$BasePrefix/$LatestFolder/$InnerSuffix/" } else { "$BasePrefix/$LatestFolder/" }
+Log "Scanning s3://$Bucket/$Prefix"
+
+$Best = $null
+$BestLM = Get-Date 0
+$continuation = $null
+
+do {
+    $pageArgs = @("s3api", "list-objects-v2", "--bucket", $Bucket, "--prefix", $Prefix, "--output", "json") + $Common
+    if ($continuation) { $pageArgs += @("--continuation-token", $continuation) }
+    $pageOut = & "$AwsCmd" @pageArgs 2>$null
+    if (-not $pageOut) { break }
+
+    try { $page = $pageOut | ConvertFrom-Json } catch { break }
+
+    foreach ($f in $page.Contents) {
+        $k = $f.Key
+        if ($k -notlike "*.bak") { continue }
+        if ($RequireFull -and ($k -notmatch "_FULL_")) { continue }
+        $lm = [datetime]$f.LastModified
+        if ($lm -gt $BestLM) { $BestLM = $lm; $Best = $f }
+    }
+
+    $continuation = if ($page.IsTruncated -and $page.NextContinuationToken) { $page.NextContinuationToken } else { $null }
+} while ($continuation)
+
+if (-not $Best) { Log "No .bak found in $Prefix"; exit 0 }
+
+# ===== DRY RUN started =====
+if ($DryRun) {
+    # Derive DB name from the S3 key (no download required)
+    $LeafFromS3 = [System.IO.Path]::GetFileName($Best.Key)
+    $DbNameSim  = $DefaultDbFallback
+    if ($LeafFromS3 -match '^(?<db>.+?)(?=_(FULL|DIFF|LOG)(_|\.))') {
+        $DbNameSim = $Matches['db']
+    } elseif ($LeafFromS3 -match '^([A-Za-z0-9_]+)_') {
+        $DbNameSim = $Matches[1]
+    }
+
+    Log ("Latest file: {0} (LastModified: {1})" -f $Best.Key, $Best.LastModified)
+    Log "===== DRY RUN MODE ENABLED ====="
+    Log "Would download: s3://$Bucket/$($Best.Key)"
+    Log "Would restore as database: [$DbNameSim] on instance: $SqlInstance"
+    Log "No files were downloaded or restored in this mode."
+    exit 0
+}
+# ===== end DRY RUN =====
+
+Log ("Latest file: {0} (LastModified: {1})" -f $Best.Key, $Best.LastModified)
+
+# ==== DOWNLOAD ====
+$Dest = Join-Path $OutRoot (Split-Path $Best.Key -Leaf)
+
+for ($i = 1; $i -le $MaxRetries; $i++) {
+    Log ("Downloading ({0}/{1}): {2}" -f $i, $MaxRetries, $Best.Key)
+    & "$AwsCmd" s3 cp ("s3://$Bucket/$($Best.Key)") $Dest --no-progress @Common
+
+    if ($LASTEXITCODE -eq 0 -and (Test-Path $Dest)) {
+        $localSize = (Get-Item $Dest).Length
+        if ($localSize -eq [long]$Best.Size) {
+            Log "============Download successful. Size verified.============="
+            break
+        } else {
+            Log ("Size mismatch: got {0}, expected {1}" -f $localSize, $Best.Size)
+        }
+    } else {
+        Log "Download failed or file missing."
+    }
+
+    if ($i -eq $MaxRetries) {
+        Log "!!!!!!!! Download failed after $MaxRetries attempts.!!!!!"
+        exit 1
+    }
+
+    Remove-Item -Force $Dest -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds ($SleepBase * $i)
+}
+
+if (-not (Test-Path $Dest)) { Log "File not found after download. Check permissions or disk space."; exit 1 }
+
+# ==== RESTORE ====
+# Parse DB name from filename like: residential_mtl_FULL_PROD_2025-10-10.bak
+$Leaf   = [System.IO.Path]::GetFileName($Dest)
+$DbName = $DefaultDbFallback
+# Grab the part before _FULL / _DIFF / _LOG (most common tags)
+if ($Leaf -match '^(?<db>.+?)(?=_(FULL|DIFF|LOG)(_|\.))') {
+    $DbName = $Matches['db']
+} elseif ($Leaf -match '^([A-Za-z0-9_]+)_') {
+    $DbName = $Matches[1]
+}
+
+$LogFile = Join-Path (Split-Path $Dest -Parent) ([System.IO.Path]::GetFileNameWithoutExtension($Dest) + ".restore.log.txt")
+Log "=========== Download complete. Attempting to restore database [$DbName] from:`n  $Dest=========="
+Log "====All SQL output will be logged to: $LogFile===="
+
+# T-SQL: drop if exists, then restore with REPLACE
+$SqlH = @"
+SET NOCOUNT ON;
+
+DECLARE @bak NVARCHAR(4000) = N'$($Dest.Replace("'", "''"))';
+DECLARE @db  SYSNAME        = N'$($DbName.Replace("'", "''"))';
+DECLARE @qdb SYSNAME        = QUOTENAME(@db);
+
+-- Drop DB if it already exists (force single-user)
+IF DB_ID(@db) IS NOT NULL
+BEGIN
+    DECLARE @sqlDrop NVARCHAR(MAX) =
+        N'ALTER DATABASE ' + @qdb + N' SET SINGLE_USER WITH ROLLBACK IMMEDIATE; ' +
+        N'DROP DATABASE ' + @qdb + N';';
+    EXEC (@sqlDrop);
+END
+
+BEGIN TRY
+    PRINT N'Starting RESTORE...';
+    DECLARE @sql NVARCHAR(MAX) =
+        N'RESTORE DATABASE ' + @qdb +
+        N' FROM DISK = N''' + REPLACE(@bak,'''','''''') + N''' WITH REPLACE, RECOVERY;';
+    EXEC (@sql);
+    PRINT N'RESTORE completed.';
+END TRY
+BEGIN CATCH
+    PRINT N'RESTORE FAILED: ' + ERROR_MESSAGE();
+    THROW;
+END CATCH
+"@
+
+# Write SQL to a temp file
+$TmpSql = Join-Path $env:TEMP ("restore_" + [System.Guid]::NewGuid().ToString("N") + ".sql")
+$SqlH | Out-File -Encoding UTF8 -FilePath $TmpSql
+
+# Run sqlcmd with trust server cert (-C) and error as nonzero (-b). Capture all output to log.
+$SqlArgs = @("-S", $SqlInstance, "-E", "-C", "-b", "-i", $TmpSql)
+$allOut = & "$SqlCmd" @SqlArgs *>&1
+$allOut | Out-File -Encoding UTF8 -FilePath $LogFile
+
+if ($LASTEXITCODE -ne 0) {
+    Log "Restore FAILED. See log: $LogFile"
+    exit 1
+} else {
+    Log "Restore completed successfully. See log: $LogFile"
+    Remove-Item -Force $TmpSql -ErrorAction SilentlyContinue
+    exit 0
+}

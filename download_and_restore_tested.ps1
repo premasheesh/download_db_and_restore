@@ -7,13 +7,13 @@ param(
     [switch]$DryRun
 )
 
-$Bucket       = "ass-rds-backup-shared"
+$Bucket       = "as-rds-backup-shared"
 $BasePrefix   = "residential_mtl"     # top-level prefix under the bucket
 $InnerSuffix  = "residential_mtl"     # optional inner folder under YYYYMMDD
 $OutRoot      = "C:\db_latest_backup" #"$HOME\db_latest_backup"
 $Profile      = "default"
 $Region       = ""
-$NoVerify     = $false
+$NoVerify     = $true
 $MaxRetries   = 3
 $SleepBase    = 5
 $RequireFull  = $true                  # true = only match _FULL_ files
@@ -23,7 +23,7 @@ $SqlInstance  = "localhost"
 $DefaultDbFallback = "residential_mtl"   # used if DB name can't be parsed from filename
 
 # ==== SETUP ====
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"
 $env:PYTHONWARNINGS = "ignore:Unverified HTTPS request"
 
 function Log($msg) { Write-Host ("[{0:yyyy-MM-dd HH:mm:ss}] {1}" -f (Get-Date), $msg) }
@@ -101,7 +101,6 @@ if (-not $Best) { Log "No .bak found in $Prefix"; exit 0 }
 
 # ===== DRY RUN started =====
 if ($DryRun) {
-    # Derive DB name from the S3 key (no download required)
     $LeafFromS3 = [System.IO.Path]::GetFileName($Best.Key)
     $DbNameSim  = $DefaultDbFallback
     if ($LeafFromS3 -match '^(?<db>.+?)(?=_(FULL|DIFF|LOG)(_|\.))') {
@@ -117,7 +116,6 @@ if ($DryRun) {
     Log "No files were downloaded or restored in this mode."
     exit 0
 }
-# ===== end DRY RUN =====
 
 Log ("Latest file: {0} (LastModified: {1})" -f $Best.Key, $Best.LastModified)
 
@@ -152,7 +150,6 @@ for ($i = 1; $i -le $MaxRetries; $i++) {
 if (-not (Test-Path $Dest)) { Log "File not found after download. Check permissions or disk space."; exit 1 }
 
 # ==== RESTORE ====
-# Parse DB name from filename like: residential_mtl_FULL_PROD_2025-10-10.bak
 $Leaf   = [System.IO.Path]::GetFileName($Dest)
 $DbName = $DefaultDbFallback
 # Grab the part before _FULL / _DIFF / _LOG (most common tags)
@@ -166,7 +163,6 @@ $LogFile = Join-Path (Split-Path $Dest -Parent) ([System.IO.Path]::GetFileNameWi
 Log "=========== Download complete. Attempting to restore database [$DbName] from:`n  $Dest=========="
 Log "====All SQL output will be logged to: $LogFile===="
 
-# T-SQL: drop if exists, then restore with REPLACE
 $SqlH = @"
 SET NOCOUNT ON;
 
@@ -174,7 +170,6 @@ DECLARE @bak NVARCHAR(4000) = N'$($Dest.Replace("'", "''"))';
 DECLARE @db  SYSNAME        = N'$($DbName.Replace("'", "''"))';
 DECLARE @qdb SYSNAME        = QUOTENAME(@db);
 
--- Drop DB if it already exists (force single-user)
 IF DB_ID(@db) IS NOT NULL
 BEGIN
     DECLARE @sqlDrop NVARCHAR(MAX) =
@@ -197,11 +192,9 @@ BEGIN CATCH
 END CATCH
 "@
 
-# Write SQL to a temp file
 $TmpSql = Join-Path $env:TEMP ("restore_" + [System.Guid]::NewGuid().ToString("N") + ".sql")
 $SqlH | Out-File -Encoding UTF8 -FilePath $TmpSql
 
-# Run sqlcmd with trust server cert (-C) and error as nonzero (-b). Capture all output to log.
 $SqlArgs = @("-S", $SqlInstance, "-E", "-C", "-b", "-i", $TmpSql)
 $allOut = & "$SqlCmd" @SqlArgs *>&1
 $allOut | Out-File -Encoding UTF8 -FilePath $LogFile

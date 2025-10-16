@@ -169,7 +169,7 @@ $SqlDataRoot = "C:\SQLData"
 if (-not (Test-Path $SqlDataRoot)) {
     try {
         New-Item -Path $SqlDataRoot -ItemType Directory -Force | Out-Null
-        Log "Created SQL data folder: $SqlDataRoot"
+        Log "Created SQL data folder for .mdf and .ldf files: $SqlDataRoot Restore still in progress......"
     } catch {
         Log "Failed to create SQL data folder: $SqlDataRoot"; exit 1
     }

@@ -64,15 +64,15 @@ $AllFolders = @()
 foreach ($cp in $rootObj.CommonPrefixes) {
     if ($cp.Prefix -match "$BasePrefix/(\d{8})/") { $AllFolders += $Matches[1] }
 }
-if (-not $AllFolders) { Log "No folders found under $BasePrefix/"; exit 0 }
+if (-not $AllFolders) { Log "!!!!===== No folders found under $BasePrefix/"; exit 0 }
 
 [int]$Latest = ($AllFolders | ForEach-Object { [int]$_ } | Measure-Object -Maximum).Maximum
 $LatestFolder = ("{0:D8}" -f $Latest)
-Log "Latest folder: $LatestFolder"
+Log "====== Latest folder found is::::: $LatestFolder"
 
 # ==== FIND LATEST .BAK IN THAT FOLDER ====
 $Prefix = if ($InnerSuffix) { "$BasePrefix/$LatestFolder/$InnerSuffix/" } else { "$BasePrefix/$LatestFolder/" }
-Log "Scanning s3://$Bucket/$Prefix"
+Log "===== Scanning s3://$Bucket/$Prefix"
 
 $Best = $null
 $BestLM = Get-Date 0
@@ -97,7 +97,7 @@ do {
     $continuation = if ($page.IsTruncated -and $page.NextContinuationToken) { $page.NextContinuationToken } else { $null }
 } while ($continuation)
 
-if (-not $Best) { Log "No .bak found in $Prefix"; exit 0 }
+if (-not $Best) { Log "!!!!======= No .bak found in $Prefix"; exit 0 }
 
 # ===== DRY RUN started =====
 if ($DryRun) {
@@ -123,6 +123,7 @@ Log ("Latest file: {0} (LastModified: {1})" -f $Best.Key, $Best.LastModified)
 $Dest = Join-Path $OutRoot (Split-Path $Best.Key -Leaf)
 
 for ($i = 1; $i -le $MaxRetries; $i++) {
+    Log "===== Downloading the latest backup from the latest folder ======"
     Log ("Downloading ({0}/{1}): {2}" -f $i, $MaxRetries, $Best.Key)
     & "$AwsCmd" s3 cp ("s3://$Bucket/$($Best.Key)") $Dest --no-progress @Common
 
@@ -163,12 +164,28 @@ $LogFile = Join-Path (Split-Path $Dest -Parent) ([System.IO.Path]::GetFileNameWi
 Log "=========== Download complete. Attempting to restore database [$DbName] from:`n  $Dest=========="
 Log "====All SQL output will be logged to: $LogFile===="
 
+# Define target folder for .mdf and .ldf files
+$SqlDataRoot = "C:\SQLData"
+if (-not (Test-Path $SqlDataRoot)) {
+    try {
+        New-Item -Path $SqlDataRoot -ItemType Directory -Force | Out-Null
+        Log "Created SQL data folder: $SqlDataRoot"
+    } catch {
+        Log "Failed to create SQL data folder: $SqlDataRoot"; exit 1
+    }
+}
+
+$MdfPath = Join-Path $SqlDataRoot "$DbName.mdf"
+$LdfPath = Join-Path $SqlDataRoot "$DbName.ldf"
+
 $SqlH = @"
 SET NOCOUNT ON;
 
 DECLARE @bak NVARCHAR(4000) = N'$($Dest.Replace("'", "''"))';
 DECLARE @db  SYSNAME        = N'$($DbName.Replace("'", "''"))';
 DECLARE @qdb SYSNAME        = QUOTENAME(@db);
+DECLARE @mdf NVARCHAR(4000) = N'$($MdfPath.Replace("'", "''"))';
+DECLARE @ldf NVARCHAR(4000) = N'$($LdfPath.Replace("'", "''"))';
 
 IF DB_ID(@db) IS NOT NULL
 BEGIN
@@ -182,7 +199,9 @@ BEGIN TRY
     PRINT N'Starting RESTORE...';
     DECLARE @sql NVARCHAR(MAX) =
         N'RESTORE DATABASE ' + @qdb +
-        N' FROM DISK = N''' + REPLACE(@bak,'''','''''') + N''' WITH REPLACE, RECOVERY;';
+        N' FROM DISK = N''' + @bak + N''' WITH REPLACE, RECOVERY, ' +
+        N'MOVE N''' + @db + N''' TO N''' + @mdf + N''', ' +
+        N'MOVE N''' + @db + '_log'' TO N''' + @ldf + N''';';
     EXEC (@sql);
     PRINT N'RESTORE completed.';
 END TRY

@@ -64,15 +64,15 @@ $AllFolders = @()
 foreach ($cp in $rootObj.CommonPrefixes) {
     if ($cp.Prefix -match "$BasePrefix/(\d{8})/") { $AllFolders += $Matches[1] }
 }
-if (-not $AllFolders) { Log "No folders found under $BasePrefix/"; exit 0 }
+if (-not $AllFolders) { Log "!!!!===== No folders found under $BasePrefix/"; exit 0 }
 
 [int]$Latest = ($AllFolders | ForEach-Object { [int]$_ } | Measure-Object -Maximum).Maximum
 $LatestFolder = ("{0:D8}" -f $Latest)
-Log "Latest folder: $LatestFolder"
+Log "====== Latest folder found is::::: $LatestFolder"
 
 # ==== FIND LATEST .BAK IN THAT FOLDER ====
 $Prefix = if ($InnerSuffix) { "$BasePrefix/$LatestFolder/$InnerSuffix/" } else { "$BasePrefix/$LatestFolder/" }
-Log "Scanning s3://$Bucket/$Prefix"
+Log "===== Scanning s3://$Bucket/$Prefix"
 
 $Best = $null
 $BestLM = Get-Date 0
@@ -97,7 +97,7 @@ do {
     $continuation = if ($page.IsTruncated -and $page.NextContinuationToken) { $page.NextContinuationToken } else { $null }
 } while ($continuation)
 
-if (-not $Best) { Log "No .bak found in $Prefix"; exit 0 }
+if (-not $Best) { Log "!!!!======= No .bak found in $Prefix"; exit 0 }
 
 # ===== DRY RUN started =====
 if ($DryRun) {
@@ -123,6 +123,7 @@ Log ("Latest file: {0} (LastModified: {1})" -f $Best.Key, $Best.LastModified)
 $Dest = Join-Path $OutRoot (Split-Path $Best.Key -Leaf)
 
 for ($i = 1; $i -le $MaxRetries; $i++) {
+    Log "===== Downloading the latest backup from the latest folder ======"
     Log ("Downloading ({0}/{1}): {2}" -f $i, $MaxRetries, $Best.Key)
     & "$AwsCmd" s3 cp ("s3://$Bucket/$($Best.Key)") $Dest --no-progress @Common
 

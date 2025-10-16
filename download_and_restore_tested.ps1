@@ -163,12 +163,28 @@ $LogFile = Join-Path (Split-Path $Dest -Parent) ([System.IO.Path]::GetFileNameWi
 Log "=========== Download complete. Attempting to restore database [$DbName] from:`n  $Dest=========="
 Log "====All SQL output will be logged to: $LogFile===="
 
+# Define target folder for .mdf and .ldf files
+$SqlDataRoot = "C:\SQLData"
+if (-not (Test-Path $SqlDataRoot)) {
+    try {
+        New-Item -Path $SqlDataRoot -ItemType Directory -Force | Out-Null
+        Log "Created SQL data folder: $SqlDataRoot"
+    } catch {
+        Log "Failed to create SQL data folder: $SqlDataRoot"; exit 1
+    }
+}
+
+$MdfPath = Join-Path $SqlDataRoot "$DbName.mdf"
+$LdfPath = Join-Path $SqlDataRoot "$DbName.ldf"
+
 $SqlH = @"
 SET NOCOUNT ON;
 
 DECLARE @bak NVARCHAR(4000) = N'$($Dest.Replace("'", "''"))';
 DECLARE @db  SYSNAME        = N'$($DbName.Replace("'", "''"))';
 DECLARE @qdb SYSNAME        = QUOTENAME(@db);
+DECLARE @mdf NVARCHAR(4000) = N'$($MdfPath.Replace("'", "''"))';
+DECLARE @ldf NVARCHAR(4000) = N'$($LdfPath.Replace("'", "''"))';
 
 IF DB_ID(@db) IS NOT NULL
 BEGIN
@@ -182,7 +198,9 @@ BEGIN TRY
     PRINT N'Starting RESTORE...';
     DECLARE @sql NVARCHAR(MAX) =
         N'RESTORE DATABASE ' + @qdb +
-        N' FROM DISK = N''' + REPLACE(@bak,'''','''''') + N''' WITH REPLACE, RECOVERY;';
+        N' FROM DISK = N''' + @bak + N''' WITH REPLACE, RECOVERY, ' +
+        N'MOVE N''' + @db + N''' TO N''' + @mdf + N''', ' +
+        N'MOVE N''' + @db + '_log'' TO N''' + @ldf + N''';';
     EXEC (@sql);
     PRINT N'RESTORE completed.';
 END TRY

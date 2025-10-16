@@ -7,7 +7,7 @@ param(
     [switch]$DryRun
 )
 
-$Bucket       = "as-rds-backup-shared"
+$Bucket       = "ass-rds-backup-shared"
 $BasePrefix   = "residential_mtl"     # top-level prefix under the bucket
 $InnerSuffix  = "residential_mtl"     # optional inner folder under YYYYMMDD
 $OutRoot      = "C:\db_latest_backup" #"$HOME\db_latest_backup"

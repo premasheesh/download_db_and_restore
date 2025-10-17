@@ -22,20 +22,21 @@ $RequireFull  = $true                  # true = only match _FULL_ files
 $SqlInstance  = "localhost"            
 $DefaultDbFallback = "residential_mtl"   # used if DB name can't be parsed from filename
 
+$LogRetentionDays = 2                  # Number of days to retain log files
+$BakRetentionDays = 2                  # Number of days to retain .bak files
+
 # ==== SETUP ====
 $ErrorActionPreference = "Continue"
 $env:PYTHONWARNINGS = "ignore:Unverified HTTPS request"
 
-function Log($msg) { Write-Host ("[{0:yyyy-MM-dd HH:mm:ss}] {1}" -f (Get-Date), $msg) }
-
 # AWS CLI detection
 $awsCmdObj = Get-Command aws.exe -ErrorAction SilentlyContinue
-if (-not $awsCmdObj) { Log "AWS CLI not found. Install AWS CLI v2 and ensure it is in PATH."; exit 1 }
+if (-not $awsCmdObj) { Write-Host "AWS CLI not found. Install AWS CLI v2 and ensure it is in PATH."; exit 1 }
 $AwsCmd = $awsCmdObj.Source
 
 # sqlcmd detection
 $sqlcmdObj = Get-Command sqlcmd.exe -ErrorAction SilentlyContinue
-if (-not $sqlcmdObj) { Log "sqlcmd.exe not found. Install SQL Server Command Line Utilities or ensure it's in PATH."; exit 1 }
+if (-not $sqlcmdObj) { Write-Host "sqlcmd.exe not found. Install SQL Server Command Line Utilities or ensure it's in PATH."; exit 1 }
 $SqlCmd = $sqlcmdObj.Source
 
 # Build common AWS args
@@ -48,8 +49,34 @@ if ($NoVerify){ $Common += "--no-verify-ssl" }
 try {
     & "$AwsCmd" sts get-caller-identity @Common | Out-Null
 } catch {
-    Log "AWS credentials invalid or expired."; exit 1
+    Write-Host "AWS credentials invalid or expired."; exit 1
 }
+
+# ==== LOG SETUP ====
+$Timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+# Create $OutRoot and logs subdirectory if they don't exist
+if (-not (Test-Path $OutRoot)) { New-Item -Path $OutRoot -ItemType Directory -Force | Out-Null }
+$LogDir = Join-Path $OutRoot "logs"
+if (-not (Test-Path $LogDir)) { New-Item -Path $LogDir -ItemType Directory -Force | Out-Null }
+$LogFile = Join-Path $LogDir "restore_$Timestamp.log"
+
+function Log($msg) {
+    $formatted = ("[{0:yyyy-MM-dd HH:mm:ss}] {1}" -f (Get-Date), $msg)
+    Write-Host $formatted
+    Add-Content -Path $LogFile -Value $formatted -Encoding UTF8
+}
+
+# Log retention: Delete old log files in logs subdirectory
+Log "Cleaning old log files older than $LogRetentionDays days from $LogDir..."
+Get-ChildItem -Path $LogDir -Filter "restore_*.log" -ErrorAction SilentlyContinue | 
+    Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-$LogRetentionDays) } | 
+    Remove-Item -Force -ErrorAction SilentlyContinue
+
+# .bak file retention: Delete .bak files older than $BakRetentionDays
+Log "Cleaning .bak files older than $BakRetentionDays days from $OutRoot..."
+Get-ChildItem -Path $OutRoot -Filter "*.bak" | 
+    Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-$BakRetentionDays) } | 
+    Remove-Item -Force -ErrorAction SilentlyContinue
 
 # ==== FIND LATEST FOLDER ====
 Log "Listing folders under s3://$Bucket/$BasePrefix/"
@@ -160,9 +187,7 @@ if ($Leaf -match '^(?<db>.+?)(?=_(FULL|DIFF|LOG)(_|\.))') {
     $DbName = $Matches[1]
 }
 
-$LogFile = Join-Path (Split-Path $Dest -Parent) ([System.IO.Path]::GetFileNameWithoutExtension($Dest) + ".restore.log.txt")
 Log "=========== Download complete. Attempting to restore database [$DbName] from:`n  $Dest=========="
-Log "====All SQL output will be logged to: $LogFile===="
 
 # Define target folder for .mdf and .ldf files
 $SqlDataRoot = "C:\SQLData"
@@ -214,9 +239,13 @@ END CATCH
 $TmpSql = Join-Path $env:TEMP ("restore_" + [System.Guid]::NewGuid().ToString("N") + ".sql")
 $SqlH | Out-File -Encoding UTF8 -FilePath $TmpSql
 
+Log "Executing SQL restore script..."
+
 $SqlArgs = @("-S", $SqlInstance, "-E", "-C", "-b", "-i", $TmpSql)
 $allOut = & "$SqlCmd" @SqlArgs *>&1
-$allOut | Out-File -Encoding UTF8 -FilePath $LogFile
+
+Log "SQL Output:"
+$allOut | ForEach-Object { Log $_ }
 
 if ($LASTEXITCODE -ne 0) {
     Log "Restore FAILED. See log: $LogFile"

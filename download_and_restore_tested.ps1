@@ -22,7 +22,7 @@ $RequireFull  = $true                  # true = only match _FULL_ files
 $SqlInstance  = "localhost"            
 $DefaultDbFallback = "residential_mtl"   # used if DB name can't be parsed from filename
 
-$LogRetentionDays = 7                  # Number of days to retain log files
+$LogRetentionDays = 2                  # Number of days to retain log files
 $BakRetentionDays = 2                  # Number of days to retain .bak files
 
 # ==== SETUP ====

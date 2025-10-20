@@ -4,8 +4,8 @@ $Config = [ordered]@{
   AuthMode            = "ServicePrincipal"
 
   # === Service Principal Credentials ===
-  TenantId            = "16e34764-f598-4c2c-88c4-2e19fa02fbb6"  # Directory (tenant) ID
-  ClientId            = "5f515515-3860-4919-b692-0cfc9f1379e2"  # Application (client) ID
+  TenantId            = ""  # Directory (tenant) ID
+  ClientId            = ""  # Application (client) ID
   ClientSecret        = ""  # Replace with new full secret VALUE
 
   SubscriptionId      = ""          # optional

@@ -3,7 +3,7 @@ initialization_script.ps1 — Complete bootstrap automation with logging
 1. Installs AWS & Azure CLI (admin check)
 2. Logs into Azure (Service Principal, Managed Identity, or Interactive)
 3. Reads AWS credentials from Azure Key Vault and configures AWS CLI
-4. Fetches GitHub PAT from Azure Key Vault, downloads your target GitHub script, and executes it
+4. Fetches GitHub PAT from Azure Key Vault, downloads the target GitHub script, and executes it
 5. Writes everything into a single log file under OutDir
 #>
 

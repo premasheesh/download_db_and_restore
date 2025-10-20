@@ -1,4 +1,4 @@
-# download_latest_from_latest_folder.ps1
+# download_and_restore_tested.ps1
 # Downloads the newest .bak file from the most recent YYYYMMDD folder in S3
 # Then restores it to SQL Server using sqlcmd. PowerShell 5-safe.
 
@@ -7,7 +7,7 @@ param(
     [switch]$DryRun
 )
 
-$Bucket       = "ass-rds-backup-shared"
+$Bucket       = "as-rds-backup-shared"
 $BasePrefix   = "residential_mtl"     # top-level prefix under the bucket
 $InnerSuffix  = "residential_mtl"     # optional inner folder under YYYYMMDD
 $OutRoot      = "C:\db_latest_backup" #"$HOME\db_latest_backup"

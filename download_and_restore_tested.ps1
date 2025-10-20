@@ -1,4 +1,4 @@
-# download_latest_from_latest_folder.ps1
+# download_and_restore_tested.ps1
 # Downloads the newest .bak file from the most recent YYYYMMDD folder in S3
 # Then restores it to SQL Server using sqlcmd. PowerShell 5-safe.
 

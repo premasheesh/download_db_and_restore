@@ -1,9 +1,10 @@
 <#
-bootstrap_all.ps1 — Complete bootstrap automation
+initialization_script.ps1 — Complete bootstrap automation with logging
 1. Installs AWS & Azure CLI (admin check)
 2. Logs into Azure (Service Principal, Managed Identity, or Interactive)
 3. Reads AWS credentials from Azure Key Vault and configures AWS CLI
 4. Fetches GitHub PAT from Azure Key Vault, downloads your target GitHub script, and executes it
+5. Writes everything into a single log file under OutDir
 #>
 
 # ==================== CONFIG ====================
@@ -40,13 +41,18 @@ $Config = [ordered]@{
 # =================== FUNCTIONS =====================
 $ErrorActionPreference = "Stop"
 function Log([string]$m){ Write-Host ("[{0:yyyy-MM-dd HH:mm:ss}] {1}" -f (Get-Date), $m) }
-function Fail([string]$m){ Write-Error $m; exit 1 }
+function Fail([string]$m){ Write-Error $m; if ($global:_TranscriptStarted) { Stop-Transcript | Out-Null }; exit 1 }
+
+# ------------------- START LOGGING -------------------
+if (-not (Test-Path $Config.OutDir)) { New-Item -ItemType Directory -Path $Config.OutDir -Force | Out-Null }
+$LogFile = Join-Path $Config.OutDir ("bootstrap_run_{0}.log" -f (Get-Date -Format "yyyyMMdd_HHmmss"))
+Start-Transcript -Path $LogFile -Append | Out-Null
+$global:_TranscriptStarted = $true
+Log "=== Logging started: $LogFile ==="
 
 # ------------------- ADMIN CHECK -------------------
 $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-if (-not $isAdmin) {
-    Fail "This script requires administrative privileges. Please run as Administrator."
-}
+if (-not $isAdmin) { Fail "This script requires administrative privileges. Please run as Administrator." }
 
 # ------------------- INSTALL CLIS -------------------
 function Test-CommandExists($Command) { return [bool](Get-Command $Command -ErrorAction SilentlyContinue) }
@@ -92,6 +98,7 @@ function Ensure-AzLogin {
   switch ($AuthMode) {
     "ServicePrincipal" {
       Log "Logging into Azure with Service Principal..."
+      $ClientSecret = ($ClientSecret -replace "[\r\n]+","").Trim()
       az login --service-principal --tenant $TenantId --username $ClientId --password "$ClientSecret" 1>$null
       if ($LASTEXITCODE -ne 0) { Fail "Service Principal login failed." }
     }
@@ -158,3 +165,5 @@ try { Unblock-File -LiteralPath $DestPath } catch {}
 Log "Launching downloaded script..."
 Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoLogo','-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$DestPath`"") -NoNewWindow -Wait
 Log "Execution complete."
+if ($global:_TranscriptStarted) { Stop-Transcript | Out-Null }
+Log "=== Logging complete: $LogFile ==="
